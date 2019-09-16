@@ -1,0 +1,78 @@
+pipeline {
+	environment {
+		registry = 'artifactory.somedomain.com:443'
+		registryCredential = ''
+        repositoryPath = 'docker-local/somepath/project'
+        containerName = 'foo-bar-microservice'
+        version = ''
+        gitCommitterAuthor = sh(script: "git show -s --pretty=%an", returnStdout: true).replaceAll(~/\n/,"")
+	}
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+				echo 'Building..'
+				sh '/usr/bin/npm rebuild node-sass'
+				sh '/usr/bin/npm install'
+				script{
+					def props = readProperties  file: '.env.qa'
+					version = props["VERSION"]
+					def image = docker.build("${registry}/${repositoryPath}/${containerName}:${version}-b$BUILD_NUMBER")
+					def tag = sh(script: "/usr/bin/docker images --filter=reference=${registry}/${repositoryPath}/${containerName}:${version}-b$BUILD_NUMBER -q", returnStdout: true).replaceAll(~/\n/,"")
+					sh "/usr/bin/docker tag ${tag} ${registry}/${repositoryPath}/${containerName}:${version}-b$BUILD_NUMBER"
+					image.push()
+				}
+            }
+        }
+        stage('Test') {
+            steps {
+                echo 'Testing..'
+				script{
+					def id = sh(script: "/usr/bin/docker ps -a --filter=name=${containerName} -q", returnStdout: true).replaceAll(~/\n/,"")
+					if(id?.trim()){
+						sh "/usr/bin/docker rm --force ${id}"
+					}
+				}
+				sh '/usr/bin/npm run test'
+            }
+        }
+        stage('Deploy') {
+            steps {
+                echo 'Deploying....'
+				script{
+					def props = readProperties  file: '.env.qa'
+					def port = props["PORT"]
+					docker.image("${registry}/${repositoryPath}/${containerName}:${version}-b$BUILD_NUMBER").run("-p ${port}:${port} -v /var/www/logs/${containerName}:/var/www/log --restart=always --name ${containerName}")
+				}
+            }
+        }
+        stage('Clean Up') {
+            steps {
+                echo 'Cleaning....'
+				sh 'git clean -f -x'
+            }
+        }
+    }
+	post {
+        success {
+			emailext attachLog: true, 
+				subject: "$JOB_NAME - Build $BUILD_DISPLAY_NAME - SUCCESS!",
+				body: "$JOB_NAME - Build $BUILD_DISPLAY_NAME - SUCCESS!\n\nChanges merged/committed by ${gitCommitterAuthor}.\n\nCheck console output at $BUILD_URL to view the results.",
+				recipientProviders: [
+					[$class: 'RequesterRecipientProvider']
+				], 
+				replyTo: '$DEFAULT_REPLYTO',
+				to: '$DEFAULT_RECIPIENTS'
+        }
+        failure {
+			emailext attachLog: true, 
+				subject: "$JOB_NAME - Build $BUILD_DISPLAY_NAME - FAILURE!",
+				body: "$JOB_NAME - Build $BUILD_DISPLAY_NAME - FAILURE!\n\nChanges merged/committed by ${gitCommitterAuthor}.\n\nCheck console output at $BUILD_URL to view the results.",
+				recipientProviders: [
+					[$class: 'RequesterRecipientProvider']
+				], 
+				replyTo: '$DEFAULT_REPLYTO',
+				to: '$DEFAULT_RECIPIENTS'
+        }
+	}
+}
